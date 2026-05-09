@@ -24,7 +24,14 @@ Wrote a greedy generation loop from scratch without using `model.generate()`. Tw
 | gamma ratio (draft/verifier) | 2.06x |
 
 ## Day 2 - Acceptance Criterion
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/acceptance.py`: acceptance_prob, get_probs, sample_residual
+- `src/test_acceptance.py`: 5 unit tests covering edge cases
+
+**TLDR**
+Implemented the core math of speculative decoding. Draft model picks a token, verifier either accepts it (prob min(1, p/q)) or rejects it and samples a correction from the residual distribution max(0, p-q). All 5 tests pass. This is the decision logic that sits inside the speculative decoding loop on Day 5.
 
 ## Day 3 - Draft Model: Propose K Tokens
 **Status**: Not started
