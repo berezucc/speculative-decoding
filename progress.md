@@ -37,7 +37,13 @@ Implemented the core math of speculative decoding. Draft model picks a token, ve
 - Leviathan et al. 2023, Section 2.3: https://arxiv.org/pdf/2211.17192
 
 ## Day 3 - Draft Model: Propose K Tokens
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/draft.py`: DraftModel class that runs distilgpt2 autoregressively for K steps, returns draft token ids and full probability distributions
+
+**TLDR**
+Combines Day 1 (KV cache loop) and Day 2 (get_probs) into one class. Runs the draft model K times, stops, and returns two tensors: draft_tokens (k,) and draft_probs (k, vocab_size). These feed directly into the verifier on Day 4 and the acceptance criterion on Day 5.
 
 ## Day 4 - Verifier: Score Draft Sequence
 **Status**: Not started
