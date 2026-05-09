@@ -33,6 +33,9 @@ Wrote a greedy generation loop from scratch without using `model.generate()`. Tw
 **TLDR**
 Implemented the core math of speculative decoding. Draft model picks a token, verifier either accepts it (prob min(1, p/q)) or rejects it and samples a correction from the residual distribution max(0, p-q). All 5 tests pass. This is the decision logic that sits inside the speculative decoding loop on Day 5.
 
+**Reference**
+- Leviathan et al. 2023, Section 2.3: https://arxiv.org/pdf/2211.17192
+
 ## Day 3 - Draft Model: Propose K Tokens
 **Status**: Not started
 
