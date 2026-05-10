@@ -46,7 +46,16 @@ Implemented the core math of speculative decoding. Draft model picks a token, ve
 Combines Day 1 (KV cache loop) and Day 2 (get_probs) into one class. Runs the draft model K times, stops, and returns two tensors: draft_tokens (k,) and draft_probs (k, vocab_size). These feed directly into the verifier on Day 4 and the acceptance criterion on Day 5.
 
 ## Day 4 - Verifier: Score Draft Sequence
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/verifier.py`: VerifierModel class that scores K draft tokens in a single parallel forward pass
+
+**TLDR**
+Verifier takes [prompt + K draft tokens] and runs gpt2-medium once, in parallel. Slices out logits at positions [L-1, L, ..., L+K-1] to get K+1 probability distributions: K for scoring each draft token, plus 1 bonus distribution if all K accepted. The off-by-one matters: logit at position i predicts token at position i+1.
+
+**Why this is the key efficiency**
+One forward pass scored 4 tokens at once. Doing it serially would have been 4 separate verifier calls. Memory bandwidth (reading the weights) is roughly the same for 1 token or K tokens, so you get K scores for the price of 1.
 
 ## Day 5 - End-to-End Speculative Decoding Loop
 **Status**: Not started
