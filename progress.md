@@ -58,7 +58,21 @@ Verifier takes [prompt + K draft tokens] and runs gpt2-medium once, in parallel.
 One forward pass scored 4 tokens at once. Doing it serially would have been 4 separate verifier calls. Memory bandwidth (reading the weights) is roughly the same for 1 token or K tokens, so you get K scores for the price of 1.
 
 ## Day 5 - End-to-End Speculative Decoding Loop
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/speculative.py`: speculative_generate() loop and correctness test
+
+**TLDR**
+Combined draft, verifier, and acceptance criterion into one loop. Each iteration: draft proposes K tokens, verifier scores them in one pass, walk through and accept or reject each, sample correction from residual if rejected, sample bonus from verifier if all K accepted. Correctness test passes: at temp=0 the output matches verifier-only greedy exactly.
+
+**Results**
+- Correctness: PASS (output identical to verifier-only greedy)
+- Acceptance rate alpha: 40% at temp=0, K=4
+- Predicted speedup with this alpha and gamma=2.06: 0.88x (slower than baseline)
+
+**Honest finding**
+Speculative decoding doesn't universally speed things up. With distilgpt2 (distilled from gpt2 small, not gpt2-medium) and M2 Max memory bandwidth, both alpha and gamma are lower than the paper's CUDA numbers. Algorithm is correct, output is provably lossless, but the speedup math doesn't favor this setup. This is the kind of real-world result Day 7 benchmarks will confirm.
 
 ## Day 6 - Measure Acceptance Rate
 **Status**: Not started
