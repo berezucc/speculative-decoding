@@ -75,7 +75,28 @@ Combined draft, verifier, and acceptance criterion into one loop. Each iteration
 Speculative decoding doesn't universally speed things up. With distilgpt2 (distilled from gpt2 small, not gpt2-medium) and M2 Max memory bandwidth, both alpha and gamma are lower than the paper's CUDA numbers. Algorithm is correct, output is provably lossless, but the speedup math doesn't favor this setup. This is the kind of real-world result Day 7 benchmarks will confirm.
 
 ## Day 6 - Measure Acceptance Rate
-**Status**: Not started
+**Status**: In progress
+
+**What I built**
+- `src/measure_alpha.py`: sweep across 20 prompts x K=[1,2,4,8] x temp=[0.0, 0.5, 1.0, 1.5]
+- Results saved to `benchmarks/alpha_results.json`
+
+**TLDR**
+Ran the speculative loop across varied prompts (prose, factual, code, creative), K values, and temperatures. For each combo, computed mean alpha across prompts to see how acceptance rate responds to K and temperature.
+
+**Results**
+| K  | T=0.0 | T=0.5 | T=1.0 | T=1.5 |
+|----|-------|-------|-------|-------|
+|  1 |       |       |       |       |
+|  2 |       |       |       |       |
+|  4 |       |       |       |       |
+|  8 |       |       |       |       |
+
+*(fill in after running the full sweep)*
+
+**Expected patterns**
+- Alpha drops as temperature rises (more random sampling, less agreement)
+- Alpha drops as K rises (longer draft sequences drift off)
 
 ## Day 7 - Throughput Benchmark
 **Status**: Not started
