@@ -105,7 +105,32 @@ Ran the speculative loop across varied prompts (prose, factual, code, creative),
 - This is because gamma=2.06 on M2 Max is too low to amortize multiple draft passes
 
 ## Day 7 - Throughput Benchmark
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/benchmark.py`: times greedy baseline vs speculative at K=1,2,4,8, compares measured vs predicted speedup
+
+**TLDR**
+The actual wall-clock test. Runs 100-token generations across 5 prompts for greedy (verifier only) and speculative at each K. Computes mean tok/s, measured speedup vs baseline, and the predicted speedup from theory using Day 6 alpha values and Day 1 gamma.
+
+**Results**
+| Method | tok/s | alpha | measured | predicted | gap |
+|---|---|---|---|---|---|
+| Greedy (verifier) | 45.7 | - | 1.00x | 1.00x | - |
+| Speculative K=1 | 19.2 | 80.64% | 0.42x | 1.22x | -0.80 |
+| Speculative K=2 | 33.5 | 71.91% | 0.73x | 1.24x | -0.51 |
+| Speculative K=4 | 38.0 | 58.95% | 0.83x | 1.14x | -0.31 |
+| Speculative K=8 | 38.7 | 46.00% | 0.85x | 0.96x | -0.11 |
+
+**Headline finding**
+Measured speedup is significantly below predicted across all K, and the gap shrinks as K grows. The theoretical formula `(1 + K*alpha) / (1 + K/gamma)` only counts forward passes. Real iterations also pay Python loop overhead, tensor concat, MPS sync, and sampling logic, all roughly fixed per iteration. Small K means short iterations means overhead dominates. Large K amortizes overhead over more tokens.
+
+**Why this is interesting**
+The paper's 2-3x speedups were on TPU/CUDA with C++ runtimes where per-iteration overhead is negligible. On M2 Max with PyTorch + MPS, that overhead eats the algorithmic gains. No K configuration beats baseline here, but K=8 comes closest to predicted (within 11%).
+
+**Also notable**
+- Alpha is higher here than Day 6 measured (80% vs 66% at K=1), likely due to using only 5 prompts vs 20
+- Baseline tok/s is faster than Day 1 (45.7 vs 30.8), likely thermal state or prompt mix differences
 
 ## Day 8 - Sequence Length Sweep
 **Status**: Not started
