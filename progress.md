@@ -133,7 +133,29 @@ The paper's 2-3x speedups were on TPU/CUDA with C++ runtimes where per-iteration
 - Baseline tok/s is faster than Day 1 (45.7 vs 30.8), likely thermal state or prompt mix differences
 
 ## Day 8 - Sequence Length Sweep
-**Status**: Not started
+**Status**: Done
+
+**What I built**
+- `src/seq_length_sweep.py`: sweeps prompt lengths 32, 128, 512 across K=1,2,4,8
+
+**TLDR**
+Tested whether longer prompts amortize per-iteration overhead enough to push speculative above baseline. They don't, and the speedup actually gets dramatically worse as prompt length grows. This is the signature of a KV cache persistence bug.
+
+**Results**
+| Length | Baseline tok/s | K=1 | K=2 | K=4 | K=8 |
+|---|---|---|---|---|---|
+| 32 | 47.4 | 0.23x (77%) | 0.35x (82%) | 0.67x (65%) | 0.95x (45%) |
+| 128 | 39.3 | 0.13x (68%) | 0.23x (56%) | 0.39x (38%) | 0.56x (22%) |
+| 512 | 32.1 | 0.10x (75%) | 0.17x (75%) | 0.22x (54%) | 0.28x (36%) |
+
+**Headline finding**
+Speedup gets dramatically worse as prompt length grows. K=8 drops from 0.95x at length 32 to 0.28x at length 512. This is the opposite of what speculative decoding should do.
+
+**Root cause**
+The KV cache is not persisted across speculative iterations. `verifier.score()` runs with `use_cache=False` and the draft model rebuilds its cache from scratch on every iteration. At length 512 with 100 generated tokens, this means the verifier reprocesses ~520 tokens on each of ~26 iterations, doing roughly 135x more compute than greedy baseline.
+
+**What this means**
+The algorithm is correct (Day 5 correctness test still passes) but the implementation has an O(N*M) inefficiency that scales with prompt length times iteration count. Fix requires persisting KV caches across iterations and truncating them on rejection. Implementation is roughly one day of work.
 
 ## Day 9 - Profiling
 **Status**: Not started
