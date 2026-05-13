@@ -75,28 +75,34 @@ Combined draft, verifier, and acceptance criterion into one loop. Each iteration
 Speculative decoding doesn't universally speed things up. With distilgpt2 (distilled from gpt2 small, not gpt2-medium) and M2 Max memory bandwidth, both alpha and gamma are lower than the paper's CUDA numbers. Algorithm is correct, output is provably lossless, but the speedup math doesn't favor this setup. This is the kind of real-world result Day 7 benchmarks will confirm.
 
 ## Day 6 - Measure Acceptance Rate
-**Status**: In progress
+**Status**: Done
 
 **What I built**
 - `src/measure_alpha.py`: sweep across 20 prompts x K=[1,2,4,8] x temp=[0.0, 0.5, 1.0, 1.5]
 - Results saved to `benchmarks/alpha_results.json`
 
 **TLDR**
-Ran the speculative loop across varied prompts (prose, factual, code, creative), K values, and temperatures. For each combo, computed mean alpha across prompts to see how acceptance rate responds to K and temperature.
+Ran the speculative loop across varied prompts (prose, factual, code, creative), K values, and temperatures. For each combo, computed mean alpha across prompts.
 
 **Results**
-| K  | T=0.0 | T=0.5 | T=1.0 | T=1.5 |
-|----|-------|-------|-------|-------|
-|  1 |       |       |       |       |
-|  2 |       |       |       |       |
-|  4 |       |       |       |       |
-|  8 |       |       |       |       |
+| K  | T=0.0  | T=0.5  | T=1.0  | T=1.5  |
+|----|--------|--------|--------|--------|
+|  1 | 66.62% | 58.11% | 53.37% | 52.24% |
+|  2 | 52.29% | 47.00% | 42.91% | 52.37% |
+|  4 | 37.95% | 33.36% | 30.70% | 31.54% |
+|  8 | 25.38% | 17.17% | 17.37% | 19.93% |
 
-*(fill in after running the full sweep)*
+**Predicted speedup vs baseline (with gamma=2.06)**
+- K=1, T=0.0: 1.12x (faster)
+- K=2, T=0.0: 1.04x (about even)
+- K=4, T=0.0: 0.86x (slower)
+- K=8, T=0.0: 0.61x (much slower)
 
-**Expected patterns**
-- Alpha drops as temperature rises (more random sampling, less agreement)
-- Alpha drops as K rises (longer draft sequences drift off)
+**Findings**
+- Alpha drops sharply as K rises, the dominant effect on this hardware
+- Temperature effect is real but weaker than the K effect
+- Conventional K=4 from the paper is suboptimal here, K=1 is the sweet spot
+- This is because gamma=2.06 on M2 Max is too low to amortize multiple draft passes
 
 ## Day 7 - Throughput Benchmark
 **Status**: Not started
