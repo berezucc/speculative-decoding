@@ -4,7 +4,7 @@ import torch
 from utils import get_device, set_seed
 from draft import DraftModel
 from verifier import VerifierModel
-from speculative import speculative_generate
+from speculative_cached import speculative_generate_cached as speculative_generate
 
 
 PROMPTS = [

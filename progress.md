@@ -157,6 +157,47 @@ The KV cache is not persisted across speculative iterations. `verifier.score()` 
 **What this means**
 The algorithm is correct (Day 5 correctness test still passes) but the implementation has an O(N*M) inefficiency that scales with prompt length times iteration count. Fix requires persisting KV caches across iterations and truncating them on rejection. Implementation is roughly one day of work.
 
+## Day 8.5 - KV Cache Persistence Fix
+**Status**: Done
+
+**What I built**
+- `src/speculative_cached.py`: rewrite of the speculative loop with KV cache persisted across iterations
+- Updated `benchmark.py`, `seq_length_sweep.py`, `measure_alpha.py` to use the cached version
+
+**TLDR**
+Naive impl reprocessed the entire prompt every iteration. Fix: maintain KV cache across iterations, only feeding new tokens per call. Truncate cache on rejection, extend on full acceptance + bonus. Algorithm and output unchanged.
+
+**Correctness**: PASS (output matches verifier-only greedy at temp=0)
+
+**Throughput benchmark (varied prompts, 100 tokens)**
+| Method | tok/s | alpha | measured | predicted |
+|---|---|---|---|---|
+| Greedy (verifier) | 48.6 | - | 1.00x | 1.00x |
+| Speculative K=1 | 32.1 | 80.64% | 0.66x | 1.22x |
+| Speculative K=2 | 35.5 | 71.91% | 0.73x | 1.24x |
+| Speculative K=4 | 40.3 | 58.95% | 0.83x | 1.14x |
+| Speculative K=8 | 41.7 | 46.00% | 0.86x | 0.96x |
+
+**Sequence length sweep (before vs after fix)**
+| Length | K | Before fix | After fix | Change |
+|---|---|---|---|---|
+| 32 | 4 | 0.67x | 0.91x | +0.24 |
+| 32 | 8 | 0.95x | 0.79x | -0.16 |
+| 128 | 4 | 0.39x | 0.66x | +0.27 |
+| 128 | 8 | 0.56x | 0.48x | -0.08 |
+| 512 | 1 | 0.10x | 0.69x | +0.59 |
+| 512 | 4 | 0.22x | 0.86x | +0.64 |
+| 512 | 8 | 0.28x | 0.74x | +0.46 |
+
+**Findings**
+- Massive improvement at long prompts: K=4 at length 512 went from 0.22x to 0.86x
+- Small regression at K=8 short prompts: cached impl adds 2-3 extra forward passes per iter for cache management (feed correction/bonus, extend draft cache after full acceptance). At length 32 with K=8 these extras nearly cancel the cache savings
+- Best result: K=4 at length 32: 0.91x of baseline, within 9% of greedy
+- Still no config breaks 1.0x on M2 Max
+
+**Why we still do not beat baseline**
+The remaining gap is per-iteration Python + MPS overhead, not algorithmic. Each forward pass on MPS has fixed kernel-launch / sync cost regardless of how many tokens it processes. With 2-4 extra small forward passes per iteration for cache management plus the K-1 draft proposal passes, the fixed overhead adds up. With a C++ runtime (vLLM, TGI, MLX), this overhead largely disappears and theoretical speedup is achievable.
+
 ## Day 9 - Profiling
 **Status**: Not started
 

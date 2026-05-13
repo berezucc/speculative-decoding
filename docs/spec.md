@@ -185,6 +185,14 @@ Goal: before Day 2, you can call `model(input_ids, past_key_values=...)` yoursel
 - KV cache grows → memory pressure → does acceptance rate change?
 - Commit: `sequence length benchmark`
 
+**Day 8.5 — Fix KV cache persistence (added mid-project)**
+- The original speculative implementation reprocesses the entire prefix on every iteration (use_cache=False on the verifier, draft cache rebuilt each iter). At length 512 this means the verifier does ~135x more compute than greedy baseline. Day 8 sweep exposed this clearly: speedup degrades as prompt length grows, opposite of expected behavior.
+- Fix: persist KV cache across iterations for both draft and verifier. On rejection, truncate caches back to the accepted-only state. On full acceptance + bonus, extend caches with the bonus token.
+- Implementation in `src/speculative_cached.py`, replaces `speculative.py` for all benchmark runs.
+- Correctness test (output matches verifier-only greedy at temp=0) must still pass.
+- Re-run Days 6, 7, 8 with the cached version.
+- Commit: `day 8.5: kv cache persistence across iterations`
+
 **Day 9 — Profile where time goes**
 - Use `torch.profiler` or manual timing to break down:
   - Draft model time per step
