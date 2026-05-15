@@ -199,7 +199,64 @@ Naive impl reprocessed the entire prompt every iteration. Fix: maintain KV cache
 The remaining gap is per-iteration Python + MPS overhead, not algorithmic. Each forward pass on MPS has fixed kernel-launch / sync cost regardless of how many tokens it processes. With 2-4 extra small forward passes per iteration for cache management plus the K-1 draft proposal passes, the fixed overhead adds up. With a C++ runtime (vLLM, TGI, MLX), this overhead largely disappears and theoretical speedup is achievable.
 
 ## Day 9 - Profiling
-**Status**: Not started
+**Status**: Done
 
-## Day 10 - Clean README + Final Benchmark Table
-**Status**: Not started
+**What I built**
+- `src/profile_breakdown.py`: per-phase timing of a speculative iteration plus a kernel-launch overhead test
+
+**Phase breakdown (K=4, 100 tokens, 5 prompts, 154 iterations total)**
+| Phase | Per iter (ms) | % of total |
+|---|---|---|
+| prefill (one-time) | 136.2 | 4.2% |
+| draft_proposal | 26.4 | 25.1% |
+| verifier_score | 35.8 | 34.1% |
+| accept_reject | 3.2 | 3.1% |
+| cache_mgmt | 4.3 | 4.1% |
+| setup_next | 30.7 | 29.3% |
+
+**Kernel launch overhead (verifier, gpt2-medium)**
+| Input tokens | Time (ms) | Cost per extra token |
+|---|---|---|
+| 1 | 26.3 | - |
+| 4 | 38.2 | 4.0 ms |
+| 16 | 46.8 | 0.7 ms |
+| 64 | 79.9 | 0.7 ms |
+
+**Kernel launch overhead (draft, distilgpt2)**
+| Input tokens | Time (ms) |
+|---|---|
+| 1 | 9.5 |
+| 4 | 27.6 |
+| 16 | 21.1 |
+| 64 | 25.8 |
+
+**Findings**
+- Verifier has ~25 ms fixed cost per forward pass on MPS, regardless of input size. Marginal cost per token is only ~0.7-1 ms after that.
+- Draft has ~9 ms fixed cost per forward pass.
+- 88% of speculative time is spent inside model forward passes. Cache mgmt + accept/reject = 7%.
+- Per speculative iter at K=4: 6 forward passes producing ~3 tokens at alpha=60% = ~31 ms per output token.
+- Greedy: 1 forward pass per token = ~26 ms per output token.
+- Speculative does more forward passes per output token than greedy on MPS because the per-call fixed cost dominates the K-parallelism benefit.
+
+**The headline**
+Algorithm is correct. The per-call MPS overhead is the entire reason speculative does not beat baseline. With a C++ runtime where forward passes cost ~1 ms instead of ~25 ms fixed, speculative would cross 1.0x.
+
+## Day 10 - Final README + Benchmark Table
+**Status**: Done
+
+**What I built**
+- Updated `README.md` with headline results, three findings, how-to-run, project structure
+- Pulled together all benchmark numbers from Days 1, 6, 7, 8, 8.5, 9 into the final tables
+
+**TLDR**
+LinkedIn-ready writeup. Three sentences cover: what surprised me (no speedup over greedy on MPS), where the bottleneck is (per-call MPS overhead ~25 ms fixed, not algorithm), and when speculative helps (C++ runtime / CUDA). Included the KV cache bug story as an honest engineering lesson.
+
+## Day 10 - Final README + Benchmark Table
+**Status**: Done
+
+**What I built**
+- Updated `README.md` with headline results, three findings, how-to-run, project structure
+- Pulled together all benchmark numbers from Days 1, 6, 7, 8, 8.5 into the final tables
+
+**TLDR**
+Wrote the LinkedIn-ready writeup. Three sentences on what surprised me (no speedup over greedy), where the bottleneck is (per-iteration Python + MPS overhead, not the verifier), and when speculative helps (CUDA + C++ runtime, or very long prompts on MPS). Included the KV cache bug story as an honest engineering lesson.

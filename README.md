@@ -1,22 +1,28 @@
 # Speculative Decoding
 
-From-scratch implementation of speculative decoding for LLM inference, benchmarked on Apple M2 Max.
+From-scratch implementation of speculative decoding (Leviathan et al. 2023) in PyTorch, benchmarked on Apple M2 Max.
 
-**Status**: In progress
+**Status**: Complete
 
 ---
 
 ## What is speculative decoding?
 
-Autoregressive LLM generation is serial: each token requires one full forward pass of the large model. For a 355M parameter model, that means reading ~700MB of weights per token — which is memory-bandwidth bound, not compute bound.
+Autoregressive LLM inference is serial: each token requires one full forward pass of the large model. For a 355M parameter model, that means reading ~700MB of weights per token, which is memory-bandwidth bound, not compute bound.
 
-Speculative decoding breaks this bottleneck:
-1. A small **draft model** proposes K tokens cheaply (fast, low quality)
+Speculative decoding breaks the bottleneck:
+
+1. A small **draft model** proposes K tokens cheaply (fast, lower quality)
 2. The large **verifier model** scores all K tokens in a single parallel forward pass
 3. Tokens are accepted or rejected based on the probability ratio `p(x) / q(x)`
 4. The output distribution is **identical** to pure verifier sampling (lossless)
 
-Result: ~2x throughput on matched model pairs, with no change in output quality.
+```
+prompt -> draft proposes [t1, t2, t3, t4]
+       -> verifier scores all 4 in one pass
+       -> accept t1, t2; reject t3 -> sample correction c
+       -> output: t1, t2, c (3 new tokens for 1 verifier pass)
+```
 
 ---
 
@@ -27,20 +33,54 @@ Result: ~2x throughput on matched model pairs, with no change in output quality.
 | Draft | distilgpt2 | 82M |
 | Verifier | gpt2-medium | 355M |
 
-Both use the same BPE tokenizer (50257 vocab) — required for the acceptance criterion.
+Both use the same GPT-2 BPE tokenizer (50257 vocab), required for the acceptance criterion.
 
 ---
 
-## Benchmark Results
+## Headline results (M2 Max, MPS backend, PyTorch)
 
-*(filled in at project completion)*
+**Correctness**: PASS. Output at temperature=0 matches verifier-only greedy decoding exactly.
 
-| Method | K | Temperature | Acceptance rate α | tokens/sec | Speedup |
-|---|---|---|---|---|---|
-| Greedy (verifier only) | — | 0.0 | — | — | 1.0x |
-| Speculative | 4 | 0.0 | — | — | —x |
-| Speculative | 4 | 0.5 | — | — | —x |
-| Speculative | 8 | 0.0 | — | — | —x |
+**Throughput** (100 tokens, 5 varied prompts, K=4, temp=0):
+
+| Method | tok/s | Speedup |
+|---|---|---|
+| Greedy (verifier only) | 48.6 | 1.00x |
+| Speculative K=4 | 40.3 | 0.83x |
+| Speculative K=8 | 41.7 | 0.86x |
+
+**Acceptance rate by K and temperature**:
+
+| K  | T=0.0  | T=0.5  | T=1.0  | T=1.5  |
+|----|--------|--------|--------|--------|
+|  1 | 67.55% | 60.48% | 54.05% | 53.90% |
+|  2 | 53.98% | 46.22% | 48.62% | 50.39% |
+|  4 | 40.24% | 38.16% | 30.70% | 36.91% |
+|  8 | 25.28% | 19.34% | 16.92% | 20.55% |
+
+**Sequence length effect** (K=4, temp=0):
+
+| Prompt length | tok/s | Speedup |
+|---|---|---|
+| 32 | 42.0 | 0.91x |
+| 128 | 28.3 | 0.66x |
+| 512 | 33.3 | 0.86x |
+
+---
+
+## Three findings
+
+**What surprised me**: speculative decoding does not beat greedy baseline on M2 Max with PyTorch + MPS at any tested configuration. The theoretical 1.2x speedup at K=4 vanishes against real per-iteration overhead.
+
+**Where the bottleneck is**: not the verifier forward pass, but the fixed per-call cost of MPS kernel launches. Profiling shows ~25 ms fixed overhead per verifier forward pass and ~9 ms per draft pass, regardless of input length (after that, each additional token costs only ~0.7 ms). Each speculative iteration does 6 forward passes (3 draft proposal + 1 verifier score + 2 setup-next) to produce ~3 tokens at K=4, α=60%. That is ~31 ms per output token vs ~26 ms for greedy (1 pass per token). 88% of speculative time is spent inside model forward passes; cache management and accept/reject logic are only ~7% combined.
+
+**When speculative decoding helps**: on hardware where per-call overhead is small (CUDA + C++ runtime). MPS's ~25 ms fixed cost per call dominates the K-token parallelism benefit. With MLX, vLLM, or any C++ inference engine that removes the Python ↔ Metal sync, this would likely cross 1.0x. The algorithm is correct and the math holds; the implementation runtime is what loses.
+
+---
+
+## A bug worth flagging
+
+The first speculative implementation reprocessed the entire prompt on every iteration (no KV cache persistence). At length 512, K=8 measured 0.28x of baseline. Fixing the KV cache management lifted that to 0.74x without changing any algorithm. The correctness test (output matches verifier-only greedy at temp=0) caught nothing because the bug was an efficiency issue, not a correctness one. Lesson: profile and benchmark do not converge on the same kind of bug.
 
 ---
 
@@ -49,14 +89,26 @@ Both use the same BPE tokenizer (50257 vocab) — required for the acceptance cr
 ```bash
 pip install -r requirements.txt
 
-# Baseline greedy decoding
+# Baseline (greedy, no speculation)
 python src/baseline.py --prompt "The transformer architecture" --n_tokens 100
 
-# Speculative decoding
-python src/speculative.py --prompt "The transformer architecture" --n_tokens 100 --k 4
+# Speculative decoding (cached, fast)
+python src/speculative_cached.py --prompt "The transformer architecture" --n_tokens 100 --k 4
 
-# Full benchmark
-python src/benchmark.py
+# Correctness test (must pass before benchmarking)
+python src/speculative_cached.py --test
+
+# Throughput benchmark
+python src/benchmark.py --n_tokens 100
+
+# Acceptance rate sweep
+python src/measure_alpha.py --n_tokens 30 --n_prompts 20
+
+# Sequence length sweep
+python src/seq_length_sweep.py --n_tokens 100
+
+# Profiling breakdown
+python src/profile_breakdown.py
 ```
 
 ---
@@ -65,23 +117,27 @@ python src/benchmark.py
 
 ```
 src/
-  baseline.py      # greedy decoding loop (no model.generate())
-  draft.py         # draft model: propose K tokens with KV cache
-  verifier.py      # verifier model: score draft sequence in one pass
-  speculative.py   # the speculative decoding loop
-  benchmark.py     # timing harness
-  utils.py         # model loading, tokenizer, seed helpers
-notebooks/
-  analysis.ipynb   # acceptance rate curves, speedup charts
-benchmarks/
-  results.md       # benchmark tables
+  baseline.py            greedy decoding with manual KV cache loop
+  draft.py               draft model: propose K tokens
+  verifier.py            verifier model: score K tokens in one pass
+  acceptance.py          acceptance criterion + residual sampling
+  speculative.py         first speculative loop (no cache persistence)
+  speculative_cached.py  cached speculative loop (correct + efficient)
+  benchmark.py           throughput vs greedy
+  measure_alpha.py       acceptance rate sweep across K and temperature
+  seq_length_sweep.py    speedup vs prompt length
+  profile_breakdown.py   per-phase timing breakdown
+  utils.py               model loader, device selection, seeding
 docs/
-  spec.md          # full project spec, reading list, sprint plan
+  spec.md                project spec, sprint plan, reading list
+benchmarks/
+  alpha_results.json     raw acceptance rate data
+progress.md              day-by-day log
 ```
 
 ---
 
 ## Papers
 
-- Leviathan et al. 2023 — [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192)
-- Chen et al. 2023 — [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318)
+- Leviathan et al. 2023, [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192)
+- Chen et al. 2023, [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318)
