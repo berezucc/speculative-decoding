@@ -1,11 +1,17 @@
 import argparse
+import sys
 import time
+from pathlib import Path
+
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from utils import get_device, set_seed, maybe_compile
 from baseline import greedy_generate
 from draft import DraftModel
 from verifier import VerifierModel
-from speculative_cached import speculative_generate_cached as speculative_generate
+from speculative import speculative_generate
 
 
 PROMPTS = [
