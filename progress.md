@@ -262,72 +262,58 @@ LinkedIn-ready writeup. Three sentences cover: what surprised me (no speedup ove
 Wrote the LinkedIn-ready writeup. Three sentences on what surprised me (no speedup over greedy), where the bottleneck is (per-iteration Python + MPS overhead, not the verifier), and when speculative helps (CUDA + C++ runtime, or very long prompts on MPS). Included the KV cache bug story as an honest engineering lesson.
 
 ## Optimization Pass (post Day 10)
-**Status**: Done, K=4 broke 1.0x
+**Status**: Done. K=4 crossed 1.0x at Phase 3, full sequence ran through Phase 5.
 
-**What I did**
-Executed `docs/optimization-plan.md` phases in order, stop condition K=4 speedup >= 1.0x.
+See `docs/optimizations.md` for the engineering deep-dive (hypotheses, code diffs, verdicts per phase).
 
-**Results**
-| Phase | Change | Greedy tok/s | Spec K=4 tok/s | Speedup | Outcome |
+### Summary table
+
+| Phase | Change | Greedy tok/s | Spec K=4 tok/s | Speedup vs Greedy | Verdict |
 |---|---|---|---|---|---|
 | 0 (baseline) | fp32, current code | 48.6 | 40.3 | 0.83x | starting point |
-| 1 | fp16 | 46.5 | 37.1 | 0.80x | reverted (no benefit; MPS per-call overhead dominates math) |
-| 2 | torch.compile | 39.6 | 33.1 | 0.83x | reverted (MPS cannot lower aten.var_mean.correction; fallback to eager hurts) |
-| 3 | eager scheme | 41.1 | 44.5 | **1.08x** | KEPT, stop condition met (K=8: 1.07x) |
+| 1 | fp16 | 46.5 | 37.1 | 0.80x | REVERTED |
+| 2 | torch.compile | 39.6 | 33.1 | 0.83x | REVERTED (kept as opt-in flag) |
+| 3 | eager scheme | 41.1 | 44.5 | **1.08x** | KEPT, stop condition met |
+| 4 | sync cleanup | 43.4 | 46.9 | 1.08x median | KEPT (neutral, cleaner code) |
+| 5 | MLX (diff model pair) | 119.3 | 75.1 (K=2 best) | 0.63x within MLX | comparison only |
 
-**The winning change**
-Eager scheme rewrite of `speculative_generate_cached()`. Removed the end-of-iter `setup_next` block (29% of total time per Day 9 profile). Each iteration now does K draft forward passes (instead of K-1 + 1 cleanup) and one K+1-token verifier pass (instead of K-token verifier + 1 cleanup). Net: 1 fewer forward pass per iter at ~25 ms per pass on MPS.
+### Phase 1 - fp16: reverted
+Changed `src/utils.py` to load models at `dtype=torch.float16`. Result: slightly slower. Forward pass time on MPS is dominated by ~25 ms fixed kernel-launch overhead per call, not memory bandwidth, so halving the weights does not translate to faster passes.
 
-**Correctness preserved**: output matches verifier-only greedy at temp=0.
+### Phase 2 - torch.compile: reverted
+Added `maybe_compile()` helper in `src/utils.py` and a `--compile` flag in `src/benchmark.py`. With `mode='reduce-overhead'` and `torch._dynamo.config.suppress_errors = True`, the compile pass errored on `aten.var_mean.correction` (used in LayerNorm) which has no MPS lowering. The fallback to eager mode preserved correctness but the dynamo scaffolding made everything slower. Helper code remains as opt-in `--compile` flag for future MPS releases.
 
-**Negative findings (the things that did NOT work on M2 Max)**
-- fp16: slightly slower. Forward pass time on MPS is dominated by kernel launch overhead, not memory bandwidth, so halving the weights didn't help.
-- torch.compile: fails on MPS for these models because the MPS backend has no lowering for `aten.var_mean.correction` (used in LayerNorm). With suppress_errors=True the fallback to eager makes things slower.
+### Phase 3 - eager scheme: the winning change
+Rewrote the iteration loop in `src/speculative_cached.py`. Changed invariant from "caches cover all of current_ids" to "caches cover current_ids[:-1]". Removed the end-of-iter `setup_next` block (which had been 29% of total time per Day 9 profile) by feeding the previous-iter's last token at the start of each iter as the first draft proposal pass, and including it in the verifier scoring input. Verifier now feeds K+1 tokens (was K) and returns all K+1 logits in one pass with no need to concatenate a saved logit.
 
-**Phases not attempted**
-- Phase 4 (sync cleanup): could add another 5-10% if pursued
-- Phase 5 (MLX port): remains the next lever if needed, but not necessary now
+Net: 1 fewer forward pass per iter (~25 ms saved on MPS).
+K=4 speedup: 0.83x -> 1.08x.
+Correctness preserved (output matches verifier-only greedy at temp=0).
 
-## Optimization Pass 2 (Phase 4 + Phase 5)
+### Phase 4 - sync cleanup: neutral, kept for code quality
+In `src/speculative_cached.py`:
+- Vectorized alpha computation with `.gather()`. One `.tolist()` instead of K `.item()` calls.
+- Pre-rolled random numbers as a CPU tensor (no MPS sync needed).
+- Inlined draft sampling at temp=0 to avoid `_sample()`'s `.max().item()` check.
 
-### Phase 4 - Sync cleanup
-**Status**: Done, neutral
+Reduced MPS syncs per iteration from ~4K to 2. Three runs at K=4: 0.99x, 1.13x, 1.08x (mean ~1.07x). Within noise of Phase 3. Forward passes dominate everything else, so reducing already-cheap Python logic didn't show at the macro level.
 
-Vectorized the accept/reject loop in `speculative_cached.py`:
-- One `.gather()` over verifier and draft probs gives all K alpha values at once
-- Single `.tolist()` to bring alphas to CPU (was K separate `.item()` syncs)
-- Pre-rolled K random numbers as a CPU tensor (was K separate `torch.rand(1).item()` calls)
-- Inlined the draft sampling at temp=0 to avoid the `.max().item()` inside `_sample`
+### Phase 5 - MLX comparison: runtime > algorithm
+mlx-lm has no pre-converted gpt2 weights and direct HF loading fails on parameter naming. Substituted Qwen2.5-0.5B / Qwen2.5-1.5B (4-bit, mlx-community). New file `src/benchmark_mlx.py` exercises `mlx_lm.stream_generate(..., draft_model=...)`.
 
-Three runs gave K=4 speedups of 0.99x, 1.13x, 1.08x; mean ~1.07x. Within noise of Phase 3. Kept for code quality but didn't move the needle. The forward passes truly dominate.
+Two findings:
+1. **MLX greedy is 2.7x faster than PyTorch greedy** on the same hardware (119.3 vs 44.5 tok/s). The runtime is the biggest lever on M2 Max.
+2. **MLX speculative is slower than MLX greedy** at every K (0.51x at K=4). 4-bit quantization makes both draft and verifier cheap, so the cost ratio gamma collapses and speculative overhead exceeds any parallelism win.
 
-### Phase 5 - MLX comparison
-**Status**: Done, big surprise
+The algorithm helps when the verifier is slow. Once the runtime is fast and the model is quantized, speculative no longer pays off.
 
-Couldn't use the gpt2/distilgpt2 pair (mlx-lm doesn't ship pre-converted weights and direct HF loading fails on parameter naming). Substituted: Qwen2.5-1.5B-Instruct-4bit (verifier) and Qwen2.5-0.5B-Instruct-4bit (draft). Same hardware (M2 Max), different runtime and different models.
+### Final scoreboard
 
-**Results (MLX, 100 tokens, 5 prompts)**
-| Method | tok/s | alpha | speedup vs MLX greedy | speedup vs PyTorch greedy |
-|---|---|---|---|---|
-| MLX Greedy | 119.3 | - | 1.00x | 2.69x |
-| MLX Speculative K=1 | 74.5 | 42.20% | 0.62x | 1.68x |
-| MLX Speculative K=2 | 75.1 | 56.60% | 0.63x | 1.70x |
-| MLX Speculative K=4 | 61.4 | 67.40% | 0.51x | 1.39x |
-| MLX Speculative K=8 | 44.6 | 72.20% | 0.37x | 1.01x |
-
-**Headline finding**
-MLX greedy alone gives a **2.7x speedup over PyTorch greedy** without any speculative decoding. The runtime, not the algorithm, is the big lever on M2 Max.
-
-**Counter-finding**
-MLX's built-in speculative decoding makes things SLOWER, not faster, for this 4-bit quantized model pair. At K=4 it drops to 0.51x of its own greedy. Reason: 4-bit quantization makes both draft and verifier so cheap that the cost ratio gamma is small (~1.3x maybe), and speculative overhead (cache management, draft sampling) outweighs the K-parallelism win.
-
-**The full optimization story**
-| Stage | Best K=4 tok/s | Speedup vs original baseline |
+| Stage | Best K=4 tok/s | vs Day 8.5 baseline |
 |---|---|---|
 | Original cached (Day 8.5) | 40.3 | 1.00x |
-| Eager scheme (Phase 3) | 44.5 | 1.10x |
-| Eager + sync cleanup (Phase 4) | 46.9 | 1.16x |
-| MLX greedy (Phase 5, different model) | 119.3 | 2.96x |
+| + Eager scheme (Phase 3) | 44.5 | 1.10x |
+| + Sync cleanup (Phase 4) | 46.9 | 1.16x |
+| MLX greedy (Phase 5, diff model) | 119.3 | 2.96x |
 
-**Practical conclusion**
-For shipping speed on M2 Max: switch to MLX. Speculative decoding is a smaller lever once the runtime is fast. The algorithm matters when per-call overhead is large; in a runtime that minimizes that overhead (MLX vs PyTorch+MPS), greedy is hard to beat.
+For shipping speed on M2 Max: switch to MLX. Within PyTorch+MPS, the eager scheme is the algorithm-level win.
