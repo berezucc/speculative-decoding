@@ -1,12 +1,24 @@
+"""
+Original speculative decoding implementation without KV cache persistence across iterations.
+Kept here as a teaching artifact: this is the version Day 5 produced, before the Day 8 sequence
+length sweep exposed the per-iteration prefix reprocessing bug. Replaced by `src/speculative.py`.
+Do not use this in benchmarks.
+"""
 import argparse
+import sys
+from pathlib import Path
+
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from utils import get_device, set_seed
 from draft import DraftModel
 from verifier import VerifierModel
 from acceptance import acceptance_prob, sample_residual
 
 
-def speculative_generate(
+def speculative_generate_naive(
     draft: DraftModel,
     verifier: VerifierModel,
     prompt: str,
@@ -97,7 +109,7 @@ def test_correctness(draft, verifier, device):
     )
 
     set_seed()
-    spec_tokens, stats = speculative_generate(
+    spec_tokens, stats = speculative_generate_naive(
         draft, verifier, prompt, n_tokens, k=4, temperature=0.0, device=device
     )
 
@@ -130,7 +142,7 @@ if __name__ == "__main__":
         test_correctness(draft, verifier, device)
     else:
         set_seed()
-        tokens, stats = speculative_generate(
+        tokens, stats = speculative_generate_naive(
             draft, verifier, args.prompt, args.n_tokens,
             k=args.k, temperature=args.temperature, device=device,
         )

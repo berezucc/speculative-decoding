@@ -13,9 +13,9 @@ Push the cached speculative implementation above 1.0x speedup vs greedy baseline
 After each change, run these three commands in order:
 
 ```bash
-python src/speculative_cached.py --test            # correctness must still PASS
-python src/benchmark.py --n_tokens 100             # measures throughput vs greedy
-python src/profile_breakdown.py                    # confirms where time went
+python src/speculative.py --test            # correctness must still PASS
+python benchmarks/throughput.py --n_tokens 100             # measures throughput vs greedy
+python benchmarks/profile.py                    # confirms where time went
 ```
 
 Record numbers in this doc under the relevant phase.
@@ -38,9 +38,9 @@ model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16)
 
 **Run**:
 ```bash
-python src/speculative_cached.py --test
+python src/speculative.py --test
 python src/baseline.py                             # see fp16 greedy baseline
-python src/benchmark.py --n_tokens 100
+python benchmarks/throughput.py --n_tokens 100
 ```
 
 **Expected outcomes**:
@@ -71,8 +71,8 @@ verifier.model = torch.compile(verifier.model, mode='reduce-overhead')
 
 **Run**:
 ```bash
-python src/speculative_cached.py --test
-python src/benchmark.py --n_tokens 100
+python src/speculative.py --test
+python benchmarks/throughput.py --n_tokens 100
 ```
 
 **Expected outcomes**:
@@ -93,7 +93,7 @@ python src/benchmark.py --n_tokens 100
 
 **Hypothesis**: removing the `setup_next` phase (29.3% of speculative time per Day 9 profile) saves 1 forward pass per iter, ~15% faster.
 
-**Change**: rewrite `src/speculative_cached.py`:
+**Change**: rewrite `src/speculative.py`:
 - Remove the end-of-iter `last_v_logit` and `last_d_logit` saves
 - Remove the end-of-iter forward passes that produced them
 - At the start of each iteration, feed `current_ids[-1]` (the last new token from previous iter) to the draft as part of the K-step proposal loop, getting K draft tokens via K forward passes (not K-1)
@@ -107,9 +107,9 @@ This trades:
 
 **Run**:
 ```bash
-python src/speculative_cached.py --test
-python src/benchmark.py --n_tokens 100
-python src/profile_breakdown.py                    # should show setup_next gone
+python src/speculative.py --test
+python benchmarks/throughput.py --n_tokens 100
+python benchmarks/profile.py                    # should show setup_next gone
 ```
 
 **Record results below**:
@@ -125,16 +125,16 @@ python src/profile_breakdown.py                    # should show setup_next gone
 
 **Hypothesis**: every `.item()` call in the inner loop forces an MPS sync. Batching them saves time.
 
-**Changes** in `speculative_cached.py`:
+**Changes** in `src/speculative.py`:
 1. Pre-roll all K random numbers once: `r_values = torch.rand(k).tolist()` outside the accept loop
 2. Compute alpha for all K in one shot before the loop: `alphas = torch.clamp(p / (q + 1e-10), max=1.0)` then convert to list once
 3. Avoid `.clone()` on saved logits unless required for correctness
-4. Audit every `.item()` call in `acceptance.py` and `speculative_cached.py`
+4. Audit every `.item()` call in `src/acceptance.py` and `src/speculative.py`
 
 **Run**:
 ```bash
-python src/speculative_cached.py --test
-python src/benchmark.py --n_tokens 100
+python src/speculative.py --test
+python benchmarks/throughput.py --n_tokens 100
 ```
 
 **Record results below**:

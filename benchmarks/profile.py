@@ -1,10 +1,16 @@
+import sys
 import time
+from pathlib import Path
+
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from utils import get_device, set_seed
 from draft import DraftModel
 from verifier import VerifierModel
 from acceptance import acceptance_prob, sample_residual
-from speculative_cached import _get_probs, _batch_get_probs, _sample, _truncate_kv
+from speculative import _get_probs, _batch_get_probs, _sample, _truncate_kv
 
 
 def sync(device):

@@ -1,5 +1,11 @@
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from acceptance import acceptance_prob, sample_residual
 
 

@@ -13,8 +13,8 @@ This document walks through a 5-phase optimization sequence executed against tha
 ## Methodology
 
 | Stop condition | If K=4 speedup >= 1.0x, halt |
-| Verification | After each change: `python src/speculative_cached.py --test` must PASS |
-| Measurement | `python src/benchmark.py --n_tokens 100` across 5 varied prompts |
+| Verification | After each change: `python src/speculative.py --test` must PASS |
+| Measurement | `python benchmarks/throughput.py --n_tokens 100` across 5 varied prompts |
 | Discipline | One change at a time. Revert any phase that regresses correctness or throughput. |
 
 Baseline before any change:
@@ -52,7 +52,7 @@ Speedup:       0.80x
 
 **Hypothesis**: `torch.compile(model, mode='reduce-overhead')` reduces Python dispatch overhead, which is a candidate for the ~25 ms per-call cost.
 
-**Change** (`src/utils.py` + `src/benchmark.py`):
+**Change** (`src/utils.py` + `benchmarks/throughput.py`):
 ```python
 # utils.py
 def maybe_compile(model, mode: str = "reduce-overhead"):
@@ -147,7 +147,7 @@ The verifier inputs `[last_token, t1, ..., tK]` of length K+1 produce exactly th
 
 ### Code change
 
-The bulk of `speculative_generate_cached()` in `src/speculative_cached.py` was rewritten. Key differences:
+The bulk of `speculative_generate_cached()` in `src/speculative.py` was rewritten. Key differences:
 
 ```python
 # Prefill: prompt[:-1] instead of full prompt
@@ -193,7 +193,7 @@ The actual time savings (~10% per iter) is smaller than the 29% the profile pred
 
 **Hypothesis**: the accept/reject loop calls `.item()` on tensors several times per draft token, each of which forces an MPS → CPU synchronization. At K=4 that's ~16 syncs per iteration, on top of the forward-pass syncs. Reducing this should help.
 
-**Changes** (all in `src/speculative_cached.py`):
+**Changes** (all in `src/speculative.py`):
 
 ### Draft sampling — inline at temp=0
 
@@ -294,7 +294,7 @@ This is not an apples-to-apples comparison of the PyTorch optimization. It is a 
 
 ### Implementation
 
-New file `src/benchmark_mlx.py` uses `mlx_lm.stream_generate(..., draft_model=...)` which has speculative decoding built in. Times greedy and speculative at K=1, 2, 4, 8 across the same 5 prompts.
+New file `benchmarks/mlx_comparison.py` uses `mlx_lm.stream_generate(..., draft_model=...)` which has speculative decoding built in. Times greedy and speculative at K=1, 2, 4, 8 across the same 5 prompts.
 
 ### Result
 

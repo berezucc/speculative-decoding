@@ -35,7 +35,7 @@ Output at temperature 0 is **bit-identical** to verifier-only greedy decoding. T
 
 - A correct, readable implementation of speculative decoding in ~200 lines of PyTorch.
 - A profiling harness that decomposes per-iteration time into draft / verifier / cache management / accept-reject phases.
-- A 5-phase optimization sequence taking the PyTorch implementation from **0.83×** to **1.16×** of greedy on M2 Max — including which phases did *not* work and why.
+- A 5-phase optimization sequence taking the PyTorch implementation from **0.83×** to **1.16×** of greedy on M2 Max - including which phases did *not* work and why.
 - A side-by-side benchmark with Apple MLX showing the inference runtime, not the algorithm, is the dominant lever on Apple Silicon.
 
 ---
@@ -45,15 +45,15 @@ Output at temperature 0 is **bit-identical** to verifier-only greedy decoding. T
 ```bash
 pip install -r requirements.txt
 
-# Correctness check — must pass before any benchmark is trustworthy
-python src/speculative_cached.py --test
+# Correctness check - must pass before any benchmark is trustworthy
+python src/speculative.py --test
 # PASS: cached spec matches verifier-only greedy (30 tokens)
 
 # Generate text
-python src/speculative_cached.py --prompt "The transformer architecture" --n_tokens 100 --k 4
+python src/speculative.py --prompt "The transformer architecture" --n_tokens 100 --k 4
 
 # Throughput benchmark
-python src/benchmark.py --n_tokens 100
+python benchmarks/throughput.py --n_tokens 100
 ```
 
 ---
@@ -64,7 +64,7 @@ python src/benchmark.py --n_tokens 100
   <img src="docs/figures/algorithm-overview.png" alt="Speculative decoding pipeline: propose autoregressively, score in a single forward pass, accept tokens" width="100%">
 </p>
 
-<sub>Diagram via third-party blog (vLLM-style serving framing); single-request analog of what this repo implements. Replace with proper attribution if you know the source.</sub>
+<sub>Diagram via third-party blog (vLLM-style serving framing); single-request analog of what this repo implements.</sub>
 
 ```
 prompt ──▶  draft model proposes  [t1, t2, t3, t4]
@@ -73,7 +73,7 @@ prompt ──▶  draft model proposes  [t1, t2, t3, t4]
        ──▶  append [t1, t2, c]   (3 new tokens for 1 verifier pass)
 ```
 
-The verifier scores K draft tokens at once because **reading its weights from memory dominates a forward pass**; the marginal cost of feeding extra tokens is small. The acceptance rule — accept with probability `min(1, p / q)`, otherwise resample from the residual `max(0, p − q)` normalized — is a change of variables that makes the output distribution exactly equal to verifier-only sampling. No quality loss.
+The verifier scores K draft tokens at once because **reading its weights from memory dominates a forward pass**; the marginal cost of feeding extra tokens is small. The acceptance rule - accept with probability `min(1, p / q)`, otherwise resample from the residual `max(0, p − q)` normalized - is a change of variables that makes the output distribution exactly equal to verifier-only sampling. No quality loss.
 
 ---
 
@@ -137,17 +137,20 @@ All benchmarks are deterministic at temperature 0 with seed 42 (set in `src/util
 
 ```bash
 # Correctness, throughput, profiling
-python src/speculative_cached.py --test
-python src/benchmark.py --n_tokens 100
-python src/profile_breakdown.py
+python src/speculative.py --test
+python benchmarks/throughput.py --n_tokens 100
+python benchmarks/profile.py
 
 # Algorithm characterization
-python src/measure_alpha.py --n_tokens 30 --n_prompts 20
-python src/seq_length_sweep.py --n_tokens 100
+python benchmarks/alpha_sweep.py --n_tokens 30 --n_prompts 20
+python benchmarks/seq_length.py --n_tokens 100
 
 # MLX comparison
 pip install mlx mlx-lm
-python src/benchmark_mlx.py --n_tokens 100
+python benchmarks/mlx_comparison.py --n_tokens 100
+
+# Unit tests
+python tests/test_acceptance.py
 ```
 
 Per-run variance on MPS is meaningful (±5–10% on absolute tok/s, driven by thermal state and process scheduling). Within-run speedup ratios are more stable than absolute throughput.
