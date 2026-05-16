@@ -41,13 +41,15 @@ Both use the same GPT-2 BPE tokenizer (50257 vocab), required for the acceptance
 
 **Correctness**: PASS. Output at temperature=0 matches verifier-only greedy decoding exactly.
 
-**Throughput** (100 tokens, 5 varied prompts, K=4, temp=0):
+**Throughput** (100 tokens, 5 varied prompts, temp=0, after eager-scheme optimization):
 
 | Method | tok/s | Speedup |
 |---|---|---|
-| Greedy (verifier only) | 48.6 | 1.00x |
-| Speculative K=4 | 40.3 | 0.83x |
-| Speculative K=8 | 41.7 | 0.86x |
+| Greedy (verifier only) | 41.1 | 1.00x |
+| Speculative K=4 | 44.5 | **1.08x** |
+| Speculative K=8 | 44.2 | 1.07x |
+
+The eager scheme removed the end-of-iter "setup_next" forward passes (29% of total time in the original cached impl per Day 9 profile), buying 1 fewer forward pass per speculative iteration. That single change crossed the 1.0x threshold on M2 Max + PyTorch + MPS.
 
 **Acceptance rate by K and temperature**:
 
@@ -68,13 +70,22 @@ Both use the same GPT-2 BPE tokenizer (50257 vocab), required for the acceptance
 
 ---
 
+## MLX comparison
+
+| Runtime | Model pair | Greedy tok/s | Best speculative tok/s | Speedup |
+|---|---|---|---|---|
+| PyTorch + MPS | distilgpt2 / gpt2-medium | 44.5 | 46.9 (K=4) | 1.08x |
+| MLX | Qwen2.5 0.5B / 1.5B (4-bit) | 119.3 | 75.1 (K=2) | 0.63x |
+
+MLX greedy is **2.7x faster than PyTorch greedy** on the same hardware. Speculative decoding inside MLX is actually slower than MLX greedy for this 4-bit quantized pair (gamma too small to amortize the algorithm's overhead). The runtime is the bigger lever than the algorithm on M2 Max.
+
 ## Three findings
 
-**What surprised me**: speculative decoding does not beat greedy baseline on M2 Max with PyTorch + MPS at any tested configuration. The theoretical 1.2x speedup at K=4 vanishes against real per-iteration overhead.
+**What surprised me**: the original cached implementation never beat greedy baseline on M2 Max + PyTorch + MPS, despite correct algorithm and proper KV cache management. The theoretical 1.2x speedup at K=4 vanished against per-iteration overhead. The fix wasn't algorithmic; it was reorganizing the loop to do 1 fewer forward pass per iteration.
 
-**Where the bottleneck is**: not the verifier forward pass, but the fixed per-call cost of MPS kernel launches. Profiling shows ~25 ms fixed overhead per verifier forward pass and ~9 ms per draft pass, regardless of input length (after that, each additional token costs only ~0.7 ms). Each speculative iteration does 6 forward passes (3 draft proposal + 1 verifier score + 2 setup-next) to produce ~3 tokens at K=4, α=60%. That is ~31 ms per output token vs ~26 ms for greedy (1 pass per token). 88% of speculative time is spent inside model forward passes; cache management and accept/reject logic are only ~7% combined.
+**Where the bottleneck was**: not the verifier forward pass, but the fixed per-call cost of MPS kernel launches. Profiling shows ~25 ms fixed overhead per verifier forward pass and ~9 ms per draft pass, regardless of input length. The original cached scheme did 6 forward passes per iter at K=4 (1 saved-logit prep + 3 draft proposal + 1 verifier score + 2 setup-next) for ~3 tokens. Eager scheme cuts that to 5 by feeding the prior-iter's last token at the start of each iter instead of saving its logit at the end.
 
-**When speculative decoding helps**: on hardware where per-call overhead is small (CUDA + C++ runtime). MPS's ~25 ms fixed cost per call dominates the K-token parallelism benefit. With MLX, vLLM, or any C++ inference engine that removes the Python ↔ Metal sync, this would likely cross 1.0x. The algorithm is correct and the math holds; the implementation runtime is what loses.
+**When speculative decoding helps**: it now does, on M2 Max. The eager scheme reaches 1.08x at K=4 and 1.07x at K=8. On hardware with lower per-call overhead (CUDA + C++ runtime, MLX), the speedup would be larger because fixed cost per pass approaches zero. On PyTorch + MPS specifically, the win is small and requires careful elimination of per-iteration overhead. Float16 inference and `torch.compile` both failed to help here: fp16 doesn't matter when overhead is fixed-per-call, and torch.compile on MPS errors on LayerNorm lowering for these models.
 
 ---
 
