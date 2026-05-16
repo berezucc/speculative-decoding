@@ -18,3 +18,14 @@ def load_model(model_name: str, device: torch.device):
 
 def set_seed(seed: int = 42):
     torch.manual_seed(seed)
+
+
+def maybe_compile(model, mode: str = "reduce-overhead"):
+    """Wrap a model with torch.compile. Falls back gracefully if MPS can't lower an op."""
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+    try:
+        return torch.compile(model, mode=mode)
+    except Exception as e:
+        print(f"torch.compile failed ({e}), using uncompiled model")
+        return model

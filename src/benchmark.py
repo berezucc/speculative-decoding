@@ -1,7 +1,7 @@
 import argparse
 import time
 import torch
-from utils import get_device, set_seed
+from utils import get_device, set_seed, maybe_compile
 from baseline import greedy_generate
 from draft import DraftModel
 from verifier import VerifierModel
@@ -49,6 +49,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_tokens", type=int, default=100)
     parser.add_argument("--gamma", type=float, default=2.06, help="draft/verifier speed ratio from day 1")
+    parser.add_argument("--compile", action="store_true", help="wrap models with torch.compile")
     args = parser.parse_args()
 
     device = get_device()
@@ -57,6 +58,10 @@ if __name__ == "__main__":
     print("loading models...")
     draft = DraftModel("distilgpt2", device)
     verifier = VerifierModel("gpt2-medium", device)
+    if args.compile:
+        print("wrapping models with torch.compile...")
+        draft.model = maybe_compile(draft.model)
+        verifier.model = maybe_compile(verifier.model)
     print()
 
     # baseline
