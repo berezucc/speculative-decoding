@@ -1,127 +1,183 @@
-# Speculative Decoding on Apple M2 Max
+<div align="center">
 
-A from-scratch PyTorch implementation of speculative decoding ([Leviathan et al., 2023](https://arxiv.org/abs/2211.17192)), benchmarked and optimized for Apple Silicon. The implementation is provably lossless (output at temperature=0 matches verifier-only greedy decoding exactly) and includes a full optimization sequence taking the speedup from 0.83x to 1.16x of greedy baseline.
+# Speculative Decoding on Apple Silicon
 
-A second benchmark using Apple's MLX runtime reveals that the inference framework, not the algorithm, is the dominant factor on M2 Max: MLX greedy alone achieves 2.7x over PyTorch greedy.
+**A from-scratch PyTorch implementation of [Leviathan et al. 2023](https://arxiv.org/abs/2211.17192), benchmarked and optimized on Apple M2 Max.**
 
-## Headline results
+*Provably lossless. 1.16× speedup over greedy in PyTorch + MPS. 2.69× greedy on Apple MLX.*
 
-All numbers from 100-token generation, 5 varied prompts, temperature=0, on Apple M2 Max.
+[Paper](https://arxiv.org/abs/2211.17192) · [Optimization deep-dive](docs/optimizations.md) · [Project spec](docs/spec.md) · [Progress log](progress.md)
 
-| Configuration | Throughput | Speedup vs PyTorch greedy |
+</div>
+
+---
+
+## Key results
+
+100-token generation, temperature 0, 5 varied prompts, Apple M2 Max.
+
+<p align="center">
+  <img src="docs/figures/optimization_journey.png" alt="Optimization journey: 0.83× to 1.16× via algorithm, 2.69× via runtime swap" width="100%">
+</p>
+
+| Configuration | Throughput | vs PyTorch greedy |
 |---|---|---|
-| PyTorch greedy (verifier only) | 44.5 tok/s | 1.00x |
-| PyTorch speculative (K=4, optimized) | 46.9 tok/s | 1.06x |
-| MLX greedy (Qwen2.5-1.5B, 4-bit) | 119.3 tok/s | **2.68x** |
-| MLX speculative (Qwen2.5 0.5B/1.5B, 4-bit) | 75.1 tok/s | 1.69x |
+| PyTorch greedy (gpt2-medium) | 44.5 tok/s | 1.00× |
+| **PyTorch speculative, K=4 (this work)** | **46.9 tok/s** | **1.06×** |
+| MLX greedy (Qwen2.5-1.5B 4-bit) | **119.3 tok/s** | **2.69×** |
+| MLX speculative, K=2 (mlx-lm built-in) | 75.1 tok/s | 1.69× |
 
-**Correctness**: output at temperature=0 is bit-identical to verifier-only greedy decoding (mathematical guarantee of speculative sampling).
+Output at temperature 0 is **bit-identical** to verifier-only greedy decoding. The mathematical guarantee from the paper holds in this implementation, verified by an exact-match correctness test.
 
-## TL;DR
+---
 
-- Implemented the algorithm correctly. KV cache management, the rejection / residual sampling step, and the off-by-one verifier scoring all work as the paper specifies.
-- The naive cached implementation runs at 0.83x of greedy on PyTorch + MPS. A 5-phase optimization pass identified per-call kernel-launch overhead (~25 ms on MPS) as the bottleneck and lifted the speedup to 1.16x by reorganizing the iteration loop ("eager scheme") to do one fewer forward pass per iter.
-- The bigger lever turns out to be the runtime. MLX greedy is 2.7x of PyTorch greedy on the same hardware. Inside MLX, speculative decoding does not help: 4-bit quantized models are already memory-bandwidth-fast, the draft/verifier cost ratio collapses, and the algorithm's overhead exceeds its benefit.
+## What's here
 
-For the engineering detail behind these numbers, see [`docs/optimizations.md`](docs/optimizations.md).
+- A correct, readable implementation of speculative decoding in ~200 lines of PyTorch.
+- A profiling harness that decomposes per-iteration time into draft / verifier / cache management / accept-reject phases.
+- A 5-phase optimization sequence taking the PyTorch implementation from **0.83×** to **1.16×** of greedy on M2 Max — including which phases did *not* work and why.
+- A side-by-side benchmark with Apple MLX showing the inference runtime, not the algorithm, is the dominant lever on Apple Silicon.
 
-## Model pair (PyTorch implementation)
-
-| Role | Model | Parameters | Tokenizer |
-|---|---|---|---|
-| Draft | distilgpt2 | 82M | GPT-2 BPE (50257) |
-| Verifier | gpt2-medium | 355M | GPT-2 BPE (50257) |
-
-Shared tokenizer is required by the acceptance criterion (both `p(x)` and `q(x)` must refer to the same vocabulary).
+---
 
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
 
-# Correctness check (must pass before trusting any benchmark)
+# Correctness check — must pass before any benchmark is trustworthy
 python src/speculative_cached.py --test
+# PASS: cached spec matches verifier-only greedy (30 tokens)
 
-# Greedy baseline
-python src/baseline.py --prompt "The transformer architecture" --n_tokens 100
-
-# Speculative decoding
+# Generate text
 python src/speculative_cached.py --prompt "The transformer architecture" --n_tokens 100 --k 4
 
 # Throughput benchmark
 python src/benchmark.py --n_tokens 100
-
-# MLX comparison (requires `pip install mlx mlx-lm`)
-python src/benchmark_mlx.py --n_tokens 100
 ```
+
+---
+
+## How it works
+
+<p align="center">
+  <img src="docs/figures/algorithm-overview.png" alt="Speculative decoding pipeline: propose autoregressively, score in a single forward pass, accept tokens" width="100%">
+</p>
+
+<sub>Diagram via third-party blog (vLLM-style serving framing); single-request analog of what this repo implements. Replace with proper attribution if you know the source.</sub>
+
+```
+prompt ──▶  draft model proposes  [t1, t2, t3, t4]
+       ──▶  verifier scores all 4 in ONE parallel forward pass
+       ──▶  accept t1, t2; reject t3  ──▶  sample correction c from max(0, p − q)
+       ──▶  append [t1, t2, c]   (3 new tokens for 1 verifier pass)
+```
+
+The verifier scores K draft tokens at once because **reading its weights from memory dominates a forward pass**; the marginal cost of feeding extra tokens is small. The acceptance rule — accept with probability `min(1, p / q)`, otherwise resample from the residual `max(0, p − q)` normalized — is a change of variables that makes the output distribution exactly equal to verifier-only sampling. No quality loss.
+
+---
 
 ## Findings
 
-**On the algorithm.** Speculative decoding is provably lossless and the implementation here demonstrates that on real hardware: at temperature=0 the speculative output matches verifier-only greedy decoding token-for-token. The acceptance rate α (fraction of draft tokens accepted) scales roughly as the paper predicts: 67% at K=1, dropping to 25% at K=8 on this model pair, and decreasing with temperature.
+**The algorithm works as the paper predicts.** Acceptance rate α scales with K and temperature in line with theory: 67% at K=1 / temp=0, dropping to 25% at K=8 / temp=0. At temperature 0 the speculative output is bit-identical to verifier-only greedy decoding.
 
-**On the bottleneck.** Profiling with `torch.mps.synchronize()` reveals ~25 ms of fixed cost per verifier forward pass on PyTorch + MPS regardless of input size, with marginal cost per token of only ~0.7-1 ms. This means the algorithm's per-iteration overhead (multiple forward passes for draft proposal, verifier scoring, and cache management) accumulates faster than the K-token parallelism saves. 88% of speculative iteration time is spent inside model forward passes, not in cache management or accept/reject logic.
+<p align="center">
+  <img src="docs/figures/alpha_heatmap.png" alt="Acceptance rate α as a function of K and temperature, distilgpt2 / gpt2-medium" width="70%">
+</p>
 
-**On optimization.** Within PyTorch+MPS, the biggest single win was reorganizing the loop to remove the end-of-iter "setup_next" forward passes (29% of total time per profile). fp16 inference did not help (bottleneck is not memory bandwidth on this runtime). torch.compile fails on the MPS backend for these models (`aten.var_mean.correction` has no lowering for LayerNorm).
+**The bottleneck on PyTorch + MPS is per-call overhead.** Profiling with `torch.mps.synchronize()` reveals **~25 ms fixed cost per verifier forward pass** regardless of input length, with marginal cost per token of only ~0.7–1 ms. 88% of speculative iteration time is inside model forward passes; cache management and accept/reject logic combined account for ~7%.
 
-**On runtime.** Switching from PyTorch+MPS to MLX (with the necessarily-different Qwen2.5 model pair) gives 2.7x speedup with no algorithmic change. Inside MLX, however, the built-in speculative decoding is slower than greedy: the draft/verifier cost ratio γ collapses when both models are small and 4-bit quantized, so there's nothing to amortize. **Speculative decoding helps when the verifier is slow.**
+<p align="center">
+  <img src="docs/figures/profile_breakdown.png" alt="Per-iteration time breakdown of the original cached speculative implementation" width="100%">
+</p>
 
-## Reproducing the results
+**The biggest single optimization was a loop reorganization.** Phase 3 of the optimization pass ("eager scheme") eliminated the end-of-iter forward passes that prepare a saved logit for the next iter, by feeding the previous-iter's last token at the start of each iter as the first draft proposal pass. *One fewer forward pass × ~25 ms* = the change that crossed 1.0×.
 
-All benchmarks are deterministic at temperature=0 with seed=42 (set in `src/utils.py:set_seed`).
+**Two things that did not work** (also useful information):
+
+- fp16 inference: no speedup, because the MPS bottleneck is not memory bandwidth.
+- `torch.compile`: errors on MPS for these models (`aten.var_mean.correction` in LayerNorm has no lowering).
+
+**The runtime is the bigger lever than the algorithm.** Apple MLX with a similar-sized 4-bit quantized model pair achieves **2.69× the throughput of optimized PyTorch greedy on the same hardware**, with no algorithmic change. But inside MLX, speculative decoding doesn't help: 4-bit models are already memory-bandwidth-fast, the draft/verifier cost ratio γ collapses, and the algorithm's overhead exceeds its benefit. **Speculative decoding helps when the verifier is slow.**
+
+<p align="center">
+  <img src="docs/figures/pytorch_vs_mlx.png" alt="Throughput comparison: PyTorch+MPS vs MLX on Apple M2 Max" width="100%">
+</p>
+
+The engineering detail behind these findings, including code diffs for each phase, lives in [`docs/optimizations.md`](docs/optimizations.md).
+
+---
+
+## Model pair
+
+| Role | Model | Parameters | Tokenizer |
+|---|---|---|---|
+| Draft | `distilgpt2` | 82M | GPT-2 BPE (50257) |
+| Verifier | `gpt2-medium` | 355M | GPT-2 BPE (50257) |
+
+A shared tokenizer is required by the acceptance criterion: `p(x)` and `q(x)` must refer to the same vocabulary.
+
+---
+
+## Hardware and software
+
+| | |
+|---|---|
+| Chip | Apple M2 Max (12-core CPU, 30-core GPU, unified memory) |
+| OS | macOS 14+ |
+| PyTorch | 2.1+ with MPS backend |
+| Transformers | 4.36+ |
+| MLX (optional) | 0.29+ |
+
+---
+
+## Reproducing
+
+All benchmarks are deterministic at temperature 0 with seed 42 (set in `src/utils.py`).
 
 ```bash
-# Correctness, throughput, and profile breakdown — PyTorch + MPS
+# Correctness, throughput, profiling
 python src/speculative_cached.py --test
 python src/benchmark.py --n_tokens 100
 python src/profile_breakdown.py
 
-# Acceptance rate sweep across K and temperature
+# Algorithm characterization
 python src/measure_alpha.py --n_tokens 30 --n_prompts 20
-
-# Sequence length sweep
 python src/seq_length_sweep.py --n_tokens 100
 
-# MLX baseline (requires pip install mlx mlx-lm)
+# MLX comparison
+pip install mlx mlx-lm
 python src/benchmark_mlx.py --n_tokens 100
 ```
 
-Per-run variance on MPS is meaningful (±5-10% on absolute tok/s due to thermal state and process scheduling). The within-run speedup ratio is more stable than absolute numbers.
+Per-run variance on MPS is meaningful (±5–10% on absolute tok/s, driven by thermal state and process scheduling). Within-run speedup ratios are more stable than absolute throughput.
 
-## Project structure
+---
 
-```
-src/
-  baseline.py            greedy decoding loop with manual KV cache
-  draft.py               draft model wrapper: propose K tokens
-  verifier.py            verifier model wrapper: score K tokens in one pass
-  acceptance.py          acceptance criterion + residual sampling, unit-tested
-  speculative.py         first speculative loop (no cache persistence) - kept for history
-  speculative_cached.py  cached speculative loop with eager scheme (current best)
-  benchmark.py           throughput benchmark, measured vs predicted speedup
-  benchmark_mlx.py       MLX comparison benchmark
-  measure_alpha.py       acceptance rate sweep across K and temperature
-  seq_length_sweep.py    speedup vs prompt length
-  profile_breakdown.py   per-phase timing breakdown of a speculative iteration
-  test_acceptance.py     unit tests for the acceptance criterion
-  utils.py               model loading, device selection, seed control
+## Citation
 
-docs/
-  spec.md                project spec, sprint plan, reading list
-  optimization-plan.md   5-phase optimization plan with stop conditions
-  optimizations.md       optimization deep-dive: hypotheses, code diffs, verdicts
+If you reference these findings, please cite the original paper:
 
-benchmarks/
-  alpha_results.json     raw acceptance rate data (K x temperature sweep)
-  results.md             benchmark tables
+```bibtex
+@inproceedings{leviathan2023fast,
+  title     = {Fast Inference from Transformers via Speculative Decoding},
+  author    = {Leviathan, Yaniv and Kalman, Matan and Matias, Yossi},
+  booktitle = {International Conference on Machine Learning},
+  year      = {2023},
+  url       = {https://arxiv.org/abs/2211.17192}
+}
 
-progress.md              day-by-day log of the 10-day sprint + optimization pass
+@article{chen2023accelerating,
+  title   = {Accelerating Large Language Model Decoding with Speculative Sampling},
+  author  = {Chen, Charlie and Borgeaud, Sebastian and Irving, Geoffrey and Lespiau, Jean-Baptiste and Sifre, Laurent and Jumper, John},
+  journal = {arXiv preprint arXiv:2302.01318},
+  year    = {2023},
+  url     = {https://arxiv.org/abs/2302.01318}
+}
 ```
 
-## References
-
-- Leviathan, Y., Kalman, M., Matias, Y. (2023). [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192). ICML.
-- Chen, C., Borgeaud, S., Irving, G., Lespiau, J.-B., Sifre, L., Jumper, J. (2023). [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318). arXiv:2302.01318.
+---
 
 ## License
 
-MIT.
+[MIT](LICENSE)
